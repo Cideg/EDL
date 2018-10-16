@@ -17,6 +17,7 @@
 
 #include "Currency.h"
 #include <cctype>
+#include <math.h>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/lexical_cast.hpp>
 #include "../Common/Base58.h"
@@ -178,6 +179,10 @@ bool Currency::getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size
   assert(m_emissionSpeedFactor > 0 && m_emissionSpeedFactor <= 8 * sizeof(uint64_t));
 
   uint64_t baseReward = (m_moneySupply - alreadyGeneratedCoins) >> m_emissionSpeedFactor;
+  if (alreadyGeneratedCoins == 0 && m_genesisBlockReward != 0) {
+    baseReward = m_genesisBlockReward;
+    std::cout << "Genesis block reward: " << baseReward << std::endl;
+  }
 
   size_t blockGrantedFullRewardZone = blockGrantedFullRewardZoneByBlockVersion(blockMajorVersion);
   medianSize = std::max(medianSize, blockGrantedFullRewardZone);
@@ -479,6 +484,9 @@ Difficulty Currency::nextDifficulty(uint8_t version, uint32_t blockIndex, std::v
   if (m_zawyDifficultyBlockIndex && m_zawyDifficultyBlockIndex <= blockIndex && (m_zawyDifficultyLastBlock == 0 || m_zawyDifficultyLastBlock >= blockIndex)) {
     return nextDifficultyZawyV1(version, blockIndex, timestamps, cumulativeDifficulties);
 }
+  if (m_zawyLWMA2DifficultyBlockIndex && m_zawyLWMA2DifficultyBlockIndex <= blockIndex && (m_zawyLWMA2DifficultyLastBlock == 0 || m_zawyLWMA2DifficultyLastBlock >= blockIndex)) {
+    return nextDifficultyZawyLWMA2(version, blockIndex, timestamps, cumulativeDifficulties);
+}
   return nextDifficultyDefault(version, blockIndex, timestamps, cumulativeDifficulties);
 }
 
@@ -544,6 +552,61 @@ Difficulty Currency::nextDifficultyZawyV1(uint8_t version, uint32_t blockIndex, 
     return nextDiffZ;
 }
 
+Difficulty Currency::nextDifficultyZawyLWMA2(uint8_t version, uint32_t blockIndex, std::vector<uint64_t> timestamps,
+  std::vector<Difficulty> cumulativeDifficulties) const {
+    // LWMA2 difficulty algorithm
+    // Copyright (c) 2017-2018 Zawy
+    // MIT license http://www.opensource.org/licenses/mit-license.php.
+    // This is an improved version of Tom Harding's (Deger8) "WT-144"  
+    // Karbowanec, Masari, Bitcoin Gold, and Bitcoin Cash have contributed.
+    // See https://github.com/zawy12/difficulty-algorithms/issues/1 for other algos.
+    // Do not use "if solvetime < 0 then solvetime = 1" which allows a catastrophic exploit.
+    // T= target_solvetime;
+    // N = int(45 * (600 / T) ^ 0.3));
+    //
+    // You can manually assign N: ZAWY_LWMA2_DIFFICULTY_N
+
+    int64_t T = static_cast<int64_t>(m_difficultyTarget);
+    int64_t N = m_zawyLWMA2DifficultyN ? m_zawyLWMA2DifficultyN : uint32_t(45 * std::pow(((double_t)600 / T), 0.3));
+    int64_t  FTL=3*T;
+    int64_t  LWMA(0), solveTime(0), sum_3_ST(0);
+    Difficulty next_D, prev_D;
+
+    if (timestamps.size() > N + 1) {
+      timestamps.resize(N + 1);
+      cumulativeDifficulties.resize(N + 1);
+    }
+    size_t n = timestamps.size();
+    assert(n == cumulativeDifficulties.size());
+    assert(n <= N);
+    if (n <= 1)
+      return 1;
+
+    uint64_t initial_difficulty_guess = 100; // Dev must set.  Guess low.
+    if (timestamps.size() <= static_cast<uint64_t>(N)) {
+      return initial_difficulty_guess;
+    }
+    // Loop through N most recent blocks.
+    for (int64_t i = 1; i <= N; i++) {
+      solveTime = std::max(-FTL, std::min( (int64_t)(timestamps[i]) - (int64_t)(timestamps[i-1]), 6*T));
+      LWMA += solveTime * i;
+      if ( i > N-3 ) { sum_3_ST += solveTime; }
+    }
+
+    next_D = ((cumulativeDifficulties[N] - cumulativeDifficulties[0])*T*(N+1)*99)/(100*2*LWMA);
+    prev_D = cumulativeDifficulties[N] - cumulativeDifficulties[N-1];
+    if ( sum_3_ST < (8*T)/10) {
+      next_D = (prev_D*110)/100;
+    }
+
+    // minimum limit
+    if (next_D < m_zawyLWMA2DifficultyMin) {
+      next_D = m_zawyLWMA2DifficultyMin;
+    }
+
+    return next_D;
+}
+
 Difficulty Currency::nextDifficultyDefault(uint8_t version, uint32_t blockIndex, std::vector<uint64_t> timestamps,
   std::vector<Difficulty> cumulativeDifficulties) const {
 
@@ -598,7 +661,10 @@ bool Currency::checkProofOfWorkV1(Crypto::cn_context& context, const CachedBlock
     return false;
   }
 
-  return check_hash(block.getBlockLongHash(context), currentDifficulty);
+  uint32_t cn_variant = 0;
+  if (m_POWCryptoNightV7BlockIndex && m_POWCryptoNightV7BlockIndex <= block.getBlockIndex() && (m_POWCryptoNightV7LastBlock == 0 || m_POWCryptoNightV7LastBlock >= block.getBlockIndex()))
+    cn_variant = 1;
+  return check_hash(block.getBlockLongHash(context, cn_variant), currentDifficulty);
 }
 
 bool Currency::checkProofOfWorkV2(Crypto::cn_context& context, const CachedBlock& cachedBlock, Difficulty currentDifficulty) const {
@@ -607,7 +673,10 @@ bool Currency::checkProofOfWorkV2(Crypto::cn_context& context, const CachedBlock
     return false;
   }
 
-  if (!check_hash(cachedBlock.getBlockLongHash(context), currentDifficulty)) {
+  uint32_t cn_variant = 0;
+  if (m_POWCryptoNightV7BlockIndex && m_POWCryptoNightV7BlockIndex <= cachedBlock.getBlockIndex() && (m_POWCryptoNightV7LastBlock == 0 || m_POWCryptoNightV7LastBlock >= cachedBlock.getBlockIndex()))
+    cn_variant = 1;
+  if (!check_hash(cachedBlock.getBlockLongHash(context, cn_variant), currentDifficulty)) {
     return false;
   }
 
@@ -682,6 +751,7 @@ m_moneySupply(currency.m_moneySupply),
 m_emissionSpeedFactor(currency.m_emissionSpeedFactor),
 m_rewardBlocksWindow(currency.m_rewardBlocksWindow),
 m_blockGrantedFullRewardZone(currency.m_blockGrantedFullRewardZone),
+m_isBlockexplorer(currency.m_isBlockexplorer),
 m_minerTxBlobReservedSize(currency.m_minerTxBlobReservedSize),
 m_numberOfDecimalPlaces(currency.m_numberOfDecimalPlaces),
 m_coin(currency.m_coin),
@@ -709,9 +779,16 @@ m_upgradeWindow(currency.m_upgradeWindow),
 m_blocksFileName(currency.m_blocksFileName),
 m_blockIndexesFileName(currency.m_blockIndexesFileName),
 m_txPoolFileName(currency.m_txPoolFileName),
+m_genesisBlockReward(currency.m_genesisBlockReward),
 m_zawyDifficultyBlockIndex(currency.m_zawyDifficultyBlockIndex),
 m_zawyDifficultyLastBlock(currency.m_zawyDifficultyLastBlock),
 m_zawyDifficultyMin(currency.m_zawyDifficultyMin),
+m_zawyLWMA2DifficultyBlockIndex(currency.m_zawyLWMA2DifficultyBlockIndex),
+m_zawyLWMA2DifficultyLastBlock(currency.m_zawyLWMA2DifficultyLastBlock),
+m_zawyLWMA2DifficultyMin(currency.m_zawyLWMA2DifficultyMin),
+m_zawyLWMA2DifficultyN(currency.m_zawyLWMA2DifficultyN),
+m_POWCryptoNightV7BlockIndex(currency.m_POWCryptoNightV7BlockIndex),
+m_POWCryptoNightV7LastBlock(currency.m_POWCryptoNightV7LastBlock),
 m_testnet(currency.m_testnet),
 genesisBlockTemplate(std::move(currency.genesisBlockTemplate)),
 cachedGenesisBlock(new CachedBlock(genesisBlockTemplate)),
@@ -730,11 +807,18 @@ CurrencyBuilder::CurrencyBuilder(Logging::ILogger& log) : m_currency(log) {
 
   moneySupply(parameters::MONEY_SUPPLY);
   emissionSpeedFactor(parameters::EMISSION_SPEED_FACTOR);
+genesisBlockReward(parameters::GENESIS_BLOCK_REWARD);
 
   rewardBlocksWindow(parameters::CRYPTONOTE_REWARD_BLOCKS_WINDOW);
 zawyDifficultyBlockIndex(parameters::ZAWY_DIFFICULTY_BLOCK_INDEX);
 zawyDifficultyLastBlock(parameters::ZAWY_DIFFICULTY_LAST_BLOCK);
 zawyDifficultyMin(parameters::ZAWY_DIFFICULTY_MIN);
+zawyLWMA2DifficultyBlockIndex(parameters::ZAWY_LWMA2_DIFFICULTY_BLOCK_INDEX);
+zawyLWMA2DifficultyLastBlock(parameters::ZAWY_LWMA2_DIFFICULTY_LAST_BLOCK);
+zawyLWMA2DifficultyMin(parameters::ZAWY_LWMA2_DIFFICULTY_MIN);
+zawyLWMA2DifficultyN(parameters::ZAWY_LWMA2_DIFFICULTY_N);
+POWCryptoNightV7BlockIndex(parameters::POW_CRYPTONIGHT_V7_BLOCK_INDEX);
+POWCryptoNightV7LastBlock(parameters::POW_CRYPTONIGHT_V7_LAST_BLOCK);
   blockGrantedFullRewardZone(parameters::CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE);
   minerTxBlobReservedSize(parameters::CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE);
 
@@ -773,6 +857,7 @@ zawyDifficultyMin(parameters::ZAWY_DIFFICULTY_MIN);
   blockIndexesFileName(parameters::CRYPTONOTE_BLOCKINDEXES_FILENAME);
   txPoolFileName(parameters::CRYPTONOTE_POOLDATA_FILENAME);
 
+    isBlockexplorer(false);
   testnet(false);
 }
 
@@ -781,6 +866,42 @@ Transaction CurrencyBuilder::generateGenesisTransaction() {
   CryptoNote::AccountPublicAddress ac = boost::value_initialized<CryptoNote::AccountPublicAddress>();
   m_currency.constructMinerTx(1, 0, 0, 0, 0, 0, ac, tx); // zero fee in genesis
   return tx;
+}
+ Transaction CurrencyBuilder::generateGenesisTransaction(const std::vector<AccountPublicAddress>& targets) {
+    assert(!targets.empty());
+ 
+    CryptoNote::Transaction tx;
+    tx.inputs.clear();
+    tx.outputs.clear();
+    tx.extra.clear();
+    tx.version = CURRENT_TRANSACTION_VERSION;
+    tx.unlockTime = m_currency.m_minedMoneyUnlockWindow;
+    KeyPair txkey = generateKeyPair();
+    addTransactionPublicKeyToExtra(tx.extra, txkey.publicKey);
+    BaseInput in;
+    in.blockIndex = 0;
+    tx.inputs.push_back(in);
+    uint64_t block_reward = m_currency.m_genesisBlockReward;
+    uint64_t target_amount = block_reward / targets.size();
+    uint64_t first_target_amount = target_amount + block_reward % targets.size();
+    for (size_t i = 0; i < targets.size(); ++i) {
+      Crypto::KeyDerivation derivation = boost::value_initialized<Crypto::KeyDerivation>();
+      Crypto::PublicKey outEphemeralPubKey = boost::value_initialized<Crypto::PublicKey>();
+      bool r = Crypto::generate_key_derivation(targets[i].viewPublicKey, txkey.secretKey, derivation);
+      assert(r == true);
+//      CHECK_AND_ASSERT_MES(r, false, "while creating outs: failed to generate_key_derivation(" << targets[i].viewPublicKey << ", " << txkey.sec << ")");
+      r = Crypto::derive_public_key(derivation, i, targets[i].spendPublicKey, outEphemeralPubKey);
+      assert(r == true);
+ //     CHECK_AND_ASSERT_MES(r, false, "while creating outs: failed to derive_public_key(" << derivation << ", " << i << ", " << targets[i].spendPublicKey << ")");
+      KeyOutput tk;
+      tk.key = outEphemeralPubKey;
+      TransactionOutput out;
+      out.amount = (i == 0) ? first_target_amount : target_amount;
+      std::cout << "outs: " << std::to_string(out.amount) << std::endl;
+      out.target = tk;
+      tx.outputs.push_back(out);
+    }
+    return tx;
 }
 CurrencyBuilder& CurrencyBuilder::emissionSpeedFactor(unsigned int val) {
   if (val <= 0 || val > 8 * sizeof(uint64_t)) {

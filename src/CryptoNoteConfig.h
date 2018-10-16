@@ -38,7 +38,14 @@ const uint64_t MONEY_SUPPLY                                  = UINT64_C(18446744
 const uint32_t ZAWY_DIFFICULTY_BLOCK_INDEX                 = 30;
 const uint32_t ZAWY_DIFFICULTY_LAST_BLOCK                 = 0;
 const uint64_t ZAWY_DIFFICULTY_MIN                 = 1;
+const uint32_t ZAWY_LWMA2_DIFFICULTY_BLOCK_INDEX                 = 0;
+const uint32_t ZAWY_LWMA2_DIFFICULTY_LAST_BLOCK                 = 0;
+const uint64_t ZAWY_LWMA2_DIFFICULTY_MIN                 = 1;
+const size_t ZAWY_LWMA2_DIFFICULTY_N                 = 0;
+const uint32_t POW_CRYPTONIGHT_V7_BLOCK_INDEX                 = 0;
+const uint32_t POW_CRYPTONIGHT_V7_LAST_BLOCK                 = 0;
 const unsigned EMISSION_SPEED_FACTOR                         = 24;
+const uint64_t GENESIS_BLOCK_REWARD                          = UINT64_C(0);
 static_assert(EMISSION_SPEED_FACTOR <= 8 * sizeof(uint64_t), "Bad EMISSION_SPEED_FACTOR");
 
 const size_t   CRYPTONOTE_REWARD_BLOCKS_WINDOW               = 100;
@@ -128,7 +135,7 @@ const uint64_t P2P_DEFAULT_INVOKE_TIMEOUT                    = 60 * 2 * 1000; //
 const size_t   P2P_DEFAULT_HANDSHAKE_INVOKE_TIMEOUT          = 5000;          // 5 seconds
 const char     P2P_STAT_TRUSTED_PUB_KEY[]                    = "";
 
-const char* const SEED_NODES[] = {  };
+const char* const SEED_NODES[] = { "173.212.249.18:4096", "85.25.34.213:4096" };
 
 
 struct CheckpointData {
